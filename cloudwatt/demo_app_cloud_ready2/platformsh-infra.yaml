@@ -1,0 +1,359 @@
+### Heat Template ###
+description: 
+  Deployment of the common infra for Platform.sh
+  heat stack-create -f platformsh-infra.yaml CloudReadyApp
+  
+  heat output-show -F raw CloudReadyApp
+  heat output-show -F raw --all CloudReadyApp
+  heat output-show -F raw --all --with-detail CloudReadyApp  
+heat_template_version: 2014-10-16
+
+parameters:
+  public_net:
+    description: Public Network ID
+    default: 6ea98324-0f14-49f6-97c0-885d1b8dc517
+    type: string
+  private_network_net_1:
+    label: Private network address - DMZ WEB
+    default: 192.168.0.0/24
+    type: string
+  private_network_net_2:
+    label: Private network address - DMZ BACKEND
+    default: 192.169.0.0/24
+    type: string
+
+  server_count:
+    description: Number of servers to boot
+    label: Servers count
+    type: number
+    default: 2
+    constraints:
+      - range : { min: 1, max: 20 }
+
+  server_flavor:
+    description: Flavor to use for the deployed instance
+    label: Instance Type (Flavor)
+    type: string
+    default: n1.cw.standard-1
+    constraints:
+      - allowed_values:
+          - t1.cw.tiny
+          - s1.cw.small-1
+          - n1.cw.highcpu-2
+          - n1.cw.highcpu-4
+          - n1.cw.highcpu-8
+          - n1.cw.standard-1
+          - n1.cw.standard-2
+          - n1.cw.standard-4
+          - n1.cw.standard-8
+          - n1.cw.standard-12
+          - n1.cw.standard-16
+          - n1.cw.highmem-2
+          - n1.cw.highmem-4
+          - n1.cw.highmem-8
+          - n1.cw.highmem-12
+
+  server_image:
+    description: Image to use to boot the servers
+    label: Instance image
+    type: string
+    default: Ubuntu 14.04
+    constraints:
+      - allowed_values:
+          - CentOS 6.5
+          - CentOS 7.0
+          - Debian Jessie
+          - Debian Wheezy
+          - Fedora 20
+          - OpenSUSE 13.1
+          - Ubuntu 12.04
+          - Ubuntu 14.04
+          - Windows Server 2008 R2 Enterprise
+          - Windows Server 2012 R2
+
+  server_keypair:
+    label: Keypair to set for the servers
+    description: Please create the keypair before launching this stack
+    default: key-shared
+#    default: home_key
+    type: string
+
+  router_name:
+    label: Router name
+    description: Router name with SourceNAT activate
+    default: front_router
+    type: string
+
+  my_IP:
+    label: Your public IP
+    description: Your address to log in SSH on the bastion server
+    default: 89.93.215.27
+    type: string
+
+
+resources:
+#--------------------#
+# Network properties #
+#--------------------#
+  private_network_1:
+    type: OS::Neutron::Net
+    properties:
+      admin_state_up: true
+      name: front-net
+      shared: false
+
+  private_subnet_1:
+    type: OS::Neutron::Subnet
+    properties:
+      cidr: { get_param: private_network_net_1 }
+      dns_nameservers: []
+      enable_dhcp: true
+      host_routes: []
+      ip_version: 4
+      name: front-subnet
+      network_id: { get_resource: private_network_1 }
+
+  private_network_2:
+    depends_on: [private_subnet_1, private_network_1]
+    type: OS::Neutron::Net
+    properties:
+      admin_state_up: true
+      name: backend-net
+      shared: false
+
+  private_subnet_2:
+    type: OS::Neutron::Subnet
+    properties:
+      cidr: { get_param: private_network_net_2 }
+      dns_nameservers: []
+      enable_dhcp: true
+      host_routes: []
+      ip_version: 4
+      name: backend-subnet
+      network_id: { get_resource: private_network_2 }
+
+  vip_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: 'Security group for Internet trafic load-balancing'
+      name: vip-sec-group
+      rules:
+      - direction: egress
+        ethertype: IPv4
+        remote_ip_prefix: 0.0.0.0/0
+      - direction: ingress
+        protocol: icmp
+      - direction: ingress
+        ethertype: IPv4
+        port_range_max: 80
+        port_range_min: 80
+        protocol: tcp
+      - direction: ingress
+        ethertype: IPv4
+        port_range_max: 443
+        port_range_min: 443
+        protocol: tcp
+
+#  backend_security_group:
+#    type: OS::Neutron::SecurityGroup
+#    properties:
+#      description: 'Security group for backend access on private network'
+#      name: back-sec-group
+#      rules:
+#      - direction: egress
+#        ethertype: IPv4
+#        remote_ip_prefix: 0.0.0.0/0
+#      - direction: ingress
+#        ethertype: IPv4
+#        remote_group_id:
+#      - direction: ingress
+#        ethertype: IPv4
+#        remote_group_id: bastion-sec-group
+
+  bastion_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: 'Security group for Internet access to the admin bastion'
+      name: bastion-sec-group
+      rules:
+      - direction: egress
+        ethertype: IPv4
+        remote_ip_prefix: 0.0.0.0/0
+      - direction: ingress
+        ethertype: IPv4
+        port_range_max: 22
+        port_range_min: 22
+        protocol: tcp
+#        remote_ip_prefix: { get_param: my_IP }
+
+#----------------------#
+# Router for SourceNAT #
+#----------------------#
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name: { get_param: router_name }
+      external_gateway_info: { "enable_snat": true, "network": { get_param: public_net } }
+
+  router_interface_int1:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet_1 }
+
+#--------------------------#
+# Load Balancer properties #
+#--------------------------#
+  lb_vip_port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups: [{ get_resource: vip_security_group }]
+      network_id: { get_resource: private_network_1 }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet_1 }
+
+  pool:
+    type: OS::Neutron::Pool
+    properties:
+      name: lb_front_pool
+      protocol: TCP
+      subnet_id: { get_resource: private_subnet_1 }
+      lb_method: ROUND_ROBIN
+      vip:
+        name: front_vip
+        description: Front-end virtual IP (VIP)
+        address : { get_attr: [lb_vip_port,fixed_ips,0,ip_address] }
+        protocol_port: 80
+#        session_persistence:
+#          type: SOURCE_IP
+
+  lbaas:
+    type: OS::Neutron::LoadBalancer
+    properties:
+      pool_id: { get_resource: pool }
+      protocol_port: 80
+
+#----------------#
+# Bastion Server #
+#----------------#
+  bastion:
+    type: OS::Nova::Server
+    properties:
+      name: bastion
+      image: Ubuntu 14.04
+      flavor: n1.cw.standard-1
+      key_name: { get_param: server_keypair }
+      security_groups: [ { get_resource: bastion_security_group } ]
+      networks:
+        - network: { get_resource: private_network_2 }
+
+#--------------#
+# Floating IPs #
+#--------------#
+  lb_vip_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_net }
+      port_id: { get_resource: lb_vip_port }
+
+  lb_pool_vip:
+    type: OS::Neutron::FloatingIPAssociation
+    depends_on: [lb_vip_port]
+    properties:
+      floatingip_id: { get_resource: lb_vip_floating_ip }
+      port_id: { get_attr: [ pool, vip, port_id ] }
+
+  bastion_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: 6ea98324-0f14-49f6-97c0-885d1b8dc517
+
+  floating_ip_link:
+    type: OS::Nova::FloatingIPAssociation
+    properties:
+      floating_ip: { get_resource: bastion_floating_ip }
+      server_id: { get_resource: bastion }
+
+#---------------------#
+# Auto-scalling group #
+#---------------------#
+  asg_front:
+    type: OS::Heat::AutoScalingGroup
+    depends_on: [private_subnet_1, private_subnet_2]
+    properties:
+      min_size: 1
+      max_size: 20
+      desired_capacity: { get_param: server_count }
+      resource:
+        type: platformsh-server.yaml
+        depends_on: [private_subnet_1, private_subnet_2]
+        properties:
+          image: { get_param: server_image }
+          flavor: { get_param: server_flavor }
+          security_group: { get_resource: vip_security_group }
+          key_name: { get_param: server_keypair }
+          network_1: { get_resource: private_network_1 }
+          network_2: { get_resource: private_network_2 }
+          pool_id: {get_resource: pool}
+          user_data:
+
+# ----- This part is optional (only if you want to use scalling policies) ----- #
+  web_server_scaleup_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: change_in_capacity
+      auto_scaling_group_id: {get_resource: asg_front}
+      cooldown: 60
+      scaling_adjustment: 1
+
+  web_server_scaledown_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: change_in_capacity
+      auto_scaling_group_id: {get_resource: asg_front}
+      cooldown: 60
+      scaling_adjustment: -1
+# ----- This part is optional (only if you want to use scalling policies) ----- #
+
+#---------#
+# Outputs #
+#---------#
+outputs:
+  APP_URL:
+    description: Access to the application public VIP
+    value:
+      str_replace:
+        template: http://HOST/
+        params:
+          HOST: { get_attr: [ lb_vip_floating_ip, floating_ip_address ] }
+  LBaaS_Test_URL:
+    description: Test LBaas 
+    value:
+      str_replace:
+        template: http://HOST/lb_test.html
+        params:
+          HOST: { get_attr: [ lb_vip_floating_ip, floating_ip_address ] }
+  LBaaS_Test_command:
+    description: Access to test URL of the LBaaS from Shell
+    value:
+      str_replace:
+        template: while sleep 1; do curl -0 http://HOST/lb_test.html; done
+        params:
+          HOST: { get_attr: [ lb_vip_floating_ip, floating_ip_address ] }
+  BASTION_IP:
+    description: Access to the Bastion server on public IP
+    value: { get_attr: [ bastion_floating_ip, floating_ip_address ] }
+# ----- This part is optional (only if you want to use scalling policies) ----- #
+  scale_up_url:
+    description: >
+      This URL is the webhook to scale up the autoscaling group.  You
+      can invoke the scale-up operation by doing an HTTP POST to this
+      URL; no body nor extra headers are needed.
+    value: {get_attr: [web_server_scaleup_policy, alarm_url]}
+  scale_dn_url:
+    description: >
+      This URL is the webhook to scale down the autoscaling group.
+      You can invoke the scale-down operation by doing an HTTP POST to
+      this URL; no body nor extra headers are needed.
+    value: {get_attr: [web_server_scaledown_policy, alarm_url]}
+# ----- This part is optional (only if you want to use scalling policies) ----- #

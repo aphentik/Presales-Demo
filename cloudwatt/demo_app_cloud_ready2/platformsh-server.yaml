@@ -1,0 +1,69 @@
+heat_template_version: 2014-10-16
+description: A server in a load-balancer pool
+
+parameters:
+  image:
+    type: string
+  security_group:
+    type: string
+  key_name:
+    type: string
+  flavor:
+    type: string
+  pool_id:
+    type: string
+  user_data:
+    type: string
+  network_1:
+    type: string
+  network_2:
+    type: string
+
+resources:
+  random_ID:
+    type: OS::Heat::RandomString
+    properties:
+      length: 12
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      flavor: {get_param: flavor}
+      security_groups: [{get_param: security_group}]
+#      image: {get_param: image}
+      image: 70a9c910-dd99-4065-bce9-11e89bc479fe
+      key_name: {get_param: key_name}
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+           #!/bin/bash
+           sudo -i
+           # Install Apache WEB server
+           #apt-get update
+           #apt-get install -y apache2
+           echo 'Application is Running on server $SERVER_ID' > /var/www/cw/lb_test.html
+           echo 'Server_ID $SERVER_ID'
+           # Activate Ethernet interface eth1 (backend)
+           sed -e "s/eth0/eth1/g" /etc/network/interfaces.d/eth0.cfg > /etc/network/interfaces.d/eth1.cfg
+           ifup eth1
+          params:
+            $SERVER_ID: { get_attr: [ random_ID, value ] }
+      networks:
+        - network: {get_param: network_1}
+        - network: {get_param: network_2}
+
+  member:
+    type: OS::Neutron::PoolMember
+    properties:
+      pool_id: {get_param: pool_id}
+      address: {get_attr: [server, first_address]}
+      protocol_port: 80
+
+outputs:
+  server_ip:
+    description: IP Address of the load-balanced server.
+    value: { get_attr: [server, first_address] }
+  lb_member:
+    description: LB member details.
+    value: { get_attr: [member, show] }
